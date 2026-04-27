@@ -270,7 +270,10 @@ async function main() {
   }
 
   const backlogStateByTeam = new Map<string, string>();
+  const issuesToProcess: LinearIssue[] = [];
 
+  // Move all triage issues to backlog first to prevent duplicate processing
+  // if a subsequent cron run starts before agents finish
   for (const issue of triageIssues) {
     log(`Processing ${issue.identifier}: ${issue.title}`);
 
@@ -287,10 +290,12 @@ async function main() {
     }
 
     const backlogStateId = backlogStateByTeam.get(issue.team.id)!;
-
     await updateIssue(issue.id, backlogStateId, user.id);
-    log(`  Updated: moved to Backlog, assigned to ${user.name}, priority Medium`);
+    log(`  Updated: moved to Backlog, assigned to ${user.email}, priority Medium`);
+    issuesToProcess.push(issue);
+  }
 
+  for (const issue of issuesToProcess) {
     try {
       await runClaudeAgent(issue, repoPaths);
     } catch (err) {
