@@ -119,7 +119,7 @@ async function getTeamStates(teamId: string): Promise<LinearState[]> {
   const data = await linearQuery<{
     team: { states: { nodes: LinearState[] } };
   }>(`
-    query($teamId: ID!) {
+    query($teamId: String!) {
       team(id: $teamId) {
         states {
           nodes {
