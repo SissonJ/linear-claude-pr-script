@@ -87,19 +87,22 @@ claude
 
 Follow the login prompts. After authenticating, the CLI stores credentials locally and subsequent runs (including cron) will use them automatically alongside `ANTHROPIC_API_KEY`.
 
-### 6. Repo path
+### 6. Repo paths
 
-Set `REPO_PATH` to the absolute path of the local git repo you want Claude to work in:
+Set `DOCS_REPO_PATH` and/or `MONOREPO_PATH` to the absolute paths of your local git repos:
 
 ```
-REPO_PATH=/Users/you/code/my-project
+DOCS_REPO_PATH=/Users/you/code/my-docs
+MONOREPO_PATH=/Users/you/code/my-monorepo
 ```
 
-That repo must:
+When both are set, the Claude agent receives both paths in its prompt and decides which repo (or repos) to make changes in based on the issue content. If a single issue touches both, it will implement changes and open PRs in each.
+
+Each repo must:
 - Have a GitHub remote (so `gh pr create` can push and open PRs)
 - Have a clean working tree before each run (the agent will create its own branch)
 
-If `REPO_PATH` is not set, the tool defaults to its own working directory, which is probably not what you want.
+If neither `DOCS_REPO_PATH` nor `MONOREPO_PATH` is set, the tool falls back to `REPO_PATH`, or the current working directory if that is also unset.
 
 ### 7. Log file (optional)
 
@@ -162,7 +165,9 @@ Tips for cron:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `LINEAR_API_KEY` | Yes | — | Linear API key (`lin_api_...`) |
-| `REPO_PATH` | No | `cwd` | Absolute path to the local git repo Claude works in |
+| `DOCS_REPO_PATH` | No | — | Absolute path to the docs repo Claude can work in |
+| `MONOREPO_PATH` | No | — | Absolute path to the monorepo Claude can work in |
+| `REPO_PATH` | No | `cwd` | Fallback repo path (used only when both above are unset) |
 | `GH_TOKEN` | Yes | — | GitHub token for `gh` CLI — needs `repo` scope |
 | `ANTHROPIC_API_KEY` | Yes | — | Anthropic/Claude API key (`sk-ant-...`) |
 | `ANTHROPIC_BASE_URL` | No | `https://api.anthropic.com` | Override for enterprise API endpoints |
@@ -177,8 +182,8 @@ Tips for cron:
 3. For each issue:
    - Fetches the team's workflow states and finds the Backlog state
    - Updates the issue: moves to Backlog, assigns to you, sets priority to Medium
-   - Spawns `claude --dangerously-skip-permissions --print <prompt>` in `REPO_PATH`
-   - The agent creates a branch, implements the fix, commits, and opens a GitHub PR
+   - Spawns `claude --dangerously-skip-permissions --print <prompt>` with all configured repo paths in the prompt
+   - The agent determines which repo(s) are relevant, creates a branch in each, implements the fix, commits, and opens a GitHub PR per repo
 4. All output (including the claude agent's full output) is appended to the log file
 5. Issues are processed sequentially — one agent at a time
 

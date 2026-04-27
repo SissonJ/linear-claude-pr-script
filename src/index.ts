@@ -5,6 +5,8 @@ import * as path from "path";
 
 const LINEAR_API_URL = "https://api.linear.app/graphql";
 const LINEAR_API_KEY = process.env.LINEAR_API_KEY;
+const DOCS_REPO_PATH = process.env.DOCS_REPO_PATH;
+const MONOREPO_PATH = process.env.MONOREPO_PATH;
 const REPO_PATH = process.env.REPO_PATH || process.cwd();
 const LOG_FILE = process.env.LOG_FILE || path.join(__dirname, "..", "linear-pr-gen.log");
 
@@ -160,7 +162,27 @@ async function updateIssue(
   `, { id: issueId, stateId: backlogStateId, assigneeId: userId });
 }
 
-function runClaudeAgent(issue: LinearIssue, repoPath: string): Promise<void> {
+function buildRepoPaths(): { label: string; path: string }[] {
+  const repos: { label: string; path: string }[] = [];
+  if (DOCS_REPO_PATH) repos.push({ label: "docs", path: DOCS_REPO_PATH });
+  if (MONOREPO_PATH) repos.push({ label: "monorepo", path: MONOREPO_PATH });
+  if (repos.length === 0) repos.push({ label: "repo", path: REPO_PATH });
+  return repos;
+}
+
+function runClaudeAgent(issue: LinearIssue, repoPaths: { label: string; path: string }[]): Promise<void> {
+  const repoSection =
+    repoPaths.length === 1
+      ? `**Repo path:** ${repoPaths[0].path}`
+      : repoPaths
+          .map((r) => `- **${r.label}:** ${r.path}`)
+          .join("\n");
+
+  const repoInstruction =
+    repoPaths.length === 1
+      ? `Work in the repo at ${repoPaths[0].path}.`
+      : `You have access to multiple repos listed above. Read the issue and choose the most appropriate repo (or repos) to make changes in. Implement all changes needed across whichever repos are relevant.`;
+
   const prompt = `You are working on a software project. Your task is to implement the solution for a Linear issue and open a GitHub PR.
 
 ## Linear Issue
@@ -171,29 +193,36 @@ function runClaudeAgent(issue: LinearIssue, repoPath: string): Promise<void> {
 **Description:**
 ${issue.description || "(no description provided)"}
 
+## Repos
+
+${repoSection}
+
 ## Instructions
 
-1. Read the codebase to understand the relevant code for this issue.
-2. Implement the solution described in the issue.
-3. Create a new git branch named \`${issue.identifier.toLowerCase()}-${issue.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40)}\`.
-4. Commit your changes with a descriptive message referencing the issue identifier.
-5. Push the branch and create a GitHub PR using \`gh pr create\`. The PR body must include:
+1. ${repoInstruction}
+2. Read the relevant codebase(s) to understand the code for this issue.
+3. Implement the solution described in the issue.
+4. Create a new git branch named \`${issue.identifier.toLowerCase()}-${issue.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40)}\` in the repo(s) you are changing.
+5. Commit your changes with a descriptive message referencing the issue identifier.
+6. Push the branch and create a GitHub PR using \`gh pr create\` for each repo you changed. Each PR body must include:
    - A summary of the changes made
    - A **Test Plan** section with a markdown checklist of concrete steps a reviewer can follow to verify the changes work correctly (e.g. specific commands to run, UI flows to exercise, edge cases to check)
    - A link to the Linear issue: ${issue.url}
-6. Output the PR URL when done.
+7. Output the PR URL(s) when done.
 
 Work autonomously and make reasonable decisions. If the description is unclear, implement your best interpretation.`;
 
+  const primaryRepoPath = repoPaths[0].path;
+
   return new Promise((resolve, reject) => {
     log(`Starting Claude agent for ${issue.identifier}: ${issue.title}`);
-    log(`  Repo: ${repoPath}`);
+    repoPaths.forEach((r) => log(`  Repo [${r.label}]: ${r.path}`));
 
     const child = spawn(
       "claude",
       ["--dangerously-skip-permissions", "--print", prompt],
       {
-        cwd: repoPath,
+        cwd: primaryRepoPath,
         stdio: ["ignore", "pipe", "pipe"],
         env: { ...process.env },
       }
@@ -224,8 +253,9 @@ Work autonomously and make reasonable decisions. If the description is unclear, 
 }
 
 async function main() {
+  const repoPaths = buildRepoPaths();
   log(`Starting linear-claude-pr-generator`);
-  log(`  Repo path: ${path.resolve(REPO_PATH)}`);
+  repoPaths.forEach((r) => log(`  Repo [${r.label}]: ${path.resolve(r.path)}`));
   log(`  Log file: ${LOG_FILE}`);
 
   const user = await getCurrentUser();
@@ -262,7 +292,7 @@ async function main() {
     log(`  Updated: moved to Backlog, assigned to ${user.name}, priority Medium`);
 
     try {
-      await runClaudeAgent(issue, REPO_PATH);
+      await runClaudeAgent(issue, repoPaths);
     } catch (err) {
       logError(`Claude agent failed for ${issue.identifier}: ${err}`);
     }
