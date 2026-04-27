@@ -1,14 +1,29 @@
 import "dotenv/config";
 import { spawn } from "child_process";
+import * as fs from "fs";
 import * as path from "path";
 
 const LINEAR_API_URL = "https://api.linear.app/graphql";
 const LINEAR_API_KEY = process.env.LINEAR_API_KEY;
 const REPO_PATH = process.env.REPO_PATH || process.cwd();
+const LOG_FILE = process.env.LOG_FILE || path.join(__dirname, "..", "linear-pr-gen.log");
 
 if (!LINEAR_API_KEY) {
-  console.error("LINEAR_API_KEY environment variable is required");
+  writeLog("ERROR", "LINEAR_API_KEY environment variable is required");
   process.exit(1);
+}
+
+function writeLog(level: "INFO" | "ERROR", message: string) {
+  const line = `[${new Date().toISOString()}] [${level}] ${message}\n`;
+  fs.appendFileSync(LOG_FILE, line);
+}
+
+function log(message: string) {
+  writeLog("INFO", message);
+}
+
+function logError(message: string) {
+  writeLog("ERROR", message);
 }
 
 interface LinearIssue {
@@ -171,8 +186,8 @@ ${issue.description || "(no description provided)"}
 Work autonomously and make reasonable decisions. If the description is unclear, implement your best interpretation.`;
 
   return new Promise((resolve, reject) => {
-    console.log(`\n[${new Date().toISOString()}] Starting Claude agent for ${issue.identifier}: ${issue.title}`);
-    console.log(`  Repo: ${repoPath}`);
+    log(`Starting Claude agent for ${issue.identifier}: ${issue.title}`);
+    log(`  Repo: ${repoPath}`);
 
     const child = spawn(
       "claude",
@@ -184,28 +199,21 @@ Work autonomously and make reasonable decisions. If the description is unclear, 
       }
     );
 
-    let stdout = "";
-    let stderr = "";
-
     child.stdout.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      stdout += text;
-      process.stdout.write(text);
+      fs.appendFileSync(LOG_FILE, chunk);
     });
 
     child.stderr.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      stderr += text;
-      process.stderr.write(text);
+      fs.appendFileSync(LOG_FILE, chunk);
     });
 
     child.on("close", (code) => {
       if (code === 0) {
-        console.log(`\n[${new Date().toISOString()}] Agent completed for ${issue.identifier}`);
+        log(`Agent completed for ${issue.identifier}`);
         resolve();
       } else {
-        console.error(`\n[${new Date().toISOString()}] Agent failed for ${issue.identifier} (exit code ${code})`);
-        reject(new Error(`Claude agent exited with code ${code}\nstderr: ${stderr}`));
+        logError(`Agent failed for ${issue.identifier} (exit code ${code})`);
+        reject(new Error(`Claude agent exited with code ${code}`));
       }
     });
 
@@ -216,34 +224,33 @@ Work autonomously and make reasonable decisions. If the description is unclear, 
 }
 
 async function main() {
-  console.log(`[${new Date().toISOString()}] Starting linear-claude-pr-generator`);
-  console.log(`  Repo path: ${path.resolve(REPO_PATH)}`);
+  log(`Starting linear-claude-pr-generator`);
+  log(`  Repo path: ${path.resolve(REPO_PATH)}`);
+  log(`  Log file: ${LOG_FILE}`);
 
   const user = await getCurrentUser();
-  console.log(`[${new Date().toISOString()}] Authenticated as: ${user.name} (${user.email})`);
+  log(`Authenticated as: ${user.name} (${user.email})`);
 
   const triageIssues = await getTriageIssues(user.id);
-  console.log(`[${new Date().toISOString()}] Found ${triageIssues.length} triage issue(s) created by you`);
+  log(`Found ${triageIssues.length} triage issue(s) created by you`);
 
   if (triageIssues.length === 0) {
-    console.log("Nothing to do.");
+    log("Nothing to do.");
     return;
   }
 
-  // Cache backlog state IDs per team to avoid redundant API calls
   const backlogStateByTeam = new Map<string, string>();
 
   for (const issue of triageIssues) {
-    console.log(`\n[${new Date().toISOString()}] Processing ${issue.identifier}: ${issue.title}`);
+    log(`Processing ${issue.identifier}: ${issue.title}`);
 
-    // Get backlog state for this team (cached)
     if (!backlogStateByTeam.has(issue.team.id)) {
       const states = await getTeamStates(issue.team.id);
       const backlog = states.find(
         (s) => s.type === "backlog" || s.name.toLowerCase() === "backlog"
       );
       if (!backlog) {
-        console.error(`  Could not find Backlog state for team ${issue.team.name}, skipping`);
+        logError(`Could not find Backlog state for team ${issue.team.name}, skipping`);
         continue;
       }
       backlogStateByTeam.set(issue.team.id, backlog.id);
@@ -251,22 +258,20 @@ async function main() {
 
     const backlogStateId = backlogStateByTeam.get(issue.team.id)!;
 
-    // Update issue: move to backlog, assign to me, medium priority
     await updateIssue(issue.id, backlogStateId, user.id);
-    console.log(`  Updated: moved to Backlog, assigned to ${user.name}, priority Medium`);
+    log(`  Updated: moved to Backlog, assigned to ${user.name}, priority Medium`);
 
-    // Run Claude agent to solve and PR
     try {
       await runClaudeAgent(issue, REPO_PATH);
     } catch (err) {
-      console.error(`  Claude agent failed for ${issue.identifier}:`, err);
+      logError(`Claude agent failed for ${issue.identifier}: ${err}`);
     }
   }
 
-  console.log(`\n[${new Date().toISOString()}] Done`);
+  log(`Done`);
 }
 
 main().catch((err) => {
-  console.error(err);
+  logError(String(err));
   process.exit(1);
 });
