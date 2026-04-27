@@ -220,7 +220,7 @@ Work autonomously and make reasonable decisions. If the description is unclear, 
 
     const child = spawn(
       "claude",
-      ["--dangerously-skip-permissions", "--print", prompt],
+      ["--permission-mode", "bypassPermissions", "--print", prompt],
       {
         cwd: primaryRepoPath,
         stdio: ["ignore", "pipe", "pipe"],
