@@ -1,0 +1,272 @@
+import "dotenv/config";
+import { spawn } from "child_process";
+import * as path from "path";
+
+const LINEAR_API_URL = "https://api.linear.app/graphql";
+const LINEAR_API_KEY = process.env.LINEAR_API_KEY;
+const REPO_PATH = process.env.REPO_PATH || process.cwd();
+
+if (!LINEAR_API_KEY) {
+  console.error("LINEAR_API_KEY environment variable is required");
+  process.exit(1);
+}
+
+interface LinearIssue {
+  id: string;
+  identifier: string;
+  title: string;
+  description: string | null;
+  url: string;
+  team: {
+    id: string;
+    name: string;
+  };
+  state: {
+    id: string;
+    name: string;
+  };
+}
+
+interface LinearState {
+  id: string;
+  name: string;
+  type: string;
+}
+
+async function linearQuery<T>(
+  query: string,
+  variables?: Record<string, unknown>
+): Promise<T> {
+  const response = await fetch(LINEAR_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: LINEAR_API_KEY!,
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  const json = (await response.json()) as { data: T; errors?: unknown[] };
+  if (json.errors) {
+    throw new Error(`Linear API error: ${JSON.stringify(json.errors)}`);
+  }
+  return json.data;
+}
+
+async function getCurrentUser(): Promise<{ id: string; name: string; email: string }> {
+  const data = await linearQuery<{ viewer: { id: string; name: string; email: string } }>(`
+    query {
+      viewer {
+        id
+        name
+        email
+      }
+    }
+  `);
+  return data.viewer;
+}
+
+async function getTriageIssues(userId: string): Promise<LinearIssue[]> {
+  const data = await linearQuery<{
+    issues: { nodes: LinearIssue[] };
+  }>(`
+    query($userId: ID!) {
+      issues(
+        filter: {
+          creator: { id: { eq: $userId } }
+          state: { type: { eq: "triage" } }
+        }
+        first: 50
+      ) {
+        nodes {
+          id
+          identifier
+          title
+          description
+          url
+          team {
+            id
+            name
+          }
+          state {
+            id
+            name
+          }
+        }
+      }
+    }
+  `, { userId });
+  return data.issues.nodes;
+}
+
+async function getTeamStates(teamId: string): Promise<LinearState[]> {
+  const data = await linearQuery<{
+    team: { states: { nodes: LinearState[] } };
+  }>(`
+    query($teamId: ID!) {
+      team(id: $teamId) {
+        states {
+          nodes {
+            id
+            name
+            type
+          }
+        }
+      }
+    }
+  `, { teamId });
+  return data.team.states.nodes;
+}
+
+async function updateIssue(
+  issueId: string,
+  backlogStateId: string,
+  userId: string
+): Promise<void> {
+  await linearQuery(`
+    mutation($id: String!, $stateId: String!, $assigneeId: String!) {
+      issueUpdate(
+        id: $id
+        input: {
+          stateId: $stateId
+          assigneeId: $assigneeId
+          priority: 3
+        }
+      ) {
+        success
+        issue {
+          id
+          identifier
+          state { name }
+          assignee { name }
+          priority
+        }
+      }
+    }
+  `, { id: issueId, stateId: backlogStateId, assigneeId: userId });
+}
+
+function runClaudeAgent(issue: LinearIssue, repoPath: string): Promise<void> {
+  const prompt = `You are working on a software project. Your task is to implement the solution for a Linear issue and open a GitHub PR.
+
+## Linear Issue
+
+**ID:** ${issue.identifier}
+**Title:** ${issue.title}
+**URL:** ${issue.url}
+**Description:**
+${issue.description || "(no description provided)"}
+
+## Instructions
+
+1. Read the codebase to understand the relevant code for this issue.
+2. Implement the solution described in the issue.
+3. Create a new git branch named \`${issue.identifier.toLowerCase()}-${issue.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40)}\`.
+4. Commit your changes with a descriptive message referencing the issue identifier.
+5. Push the branch and create a GitHub PR using \`gh pr create\`. The PR body must include:
+   - A summary of the changes made
+   - A **Test Plan** section with a markdown checklist of concrete steps a reviewer can follow to verify the changes work correctly (e.g. specific commands to run, UI flows to exercise, edge cases to check)
+   - A link to the Linear issue: ${issue.url}
+6. Output the PR URL when done.
+
+Work autonomously and make reasonable decisions. If the description is unclear, implement your best interpretation.`;
+
+  return new Promise((resolve, reject) => {
+    console.log(`\n[${new Date().toISOString()}] Starting Claude agent for ${issue.identifier}: ${issue.title}`);
+    console.log(`  Repo: ${repoPath}`);
+
+    const child = spawn(
+      "claude",
+      ["--dangerously-skip-permissions", "--print", prompt],
+      {
+        cwd: repoPath,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env },
+      }
+    );
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stdout += text;
+      process.stdout.write(text);
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString();
+      stderr += text;
+      process.stderr.write(text);
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        console.log(`\n[${new Date().toISOString()}] Agent completed for ${issue.identifier}`);
+        resolve();
+      } else {
+        console.error(`\n[${new Date().toISOString()}] Agent failed for ${issue.identifier} (exit code ${code})`);
+        reject(new Error(`Claude agent exited with code ${code}\nstderr: ${stderr}`));
+      }
+    });
+
+    child.on("error", (err) => {
+      reject(new Error(`Failed to spawn Claude agent: ${err.message}`));
+    });
+  });
+}
+
+async function main() {
+  console.log(`[${new Date().toISOString()}] Starting linear-claude-pr-generator`);
+  console.log(`  Repo path: ${path.resolve(REPO_PATH)}`);
+
+  const user = await getCurrentUser();
+  console.log(`[${new Date().toISOString()}] Authenticated as: ${user.name} (${user.email})`);
+
+  const triageIssues = await getTriageIssues(user.id);
+  console.log(`[${new Date().toISOString()}] Found ${triageIssues.length} triage issue(s) created by you`);
+
+  if (triageIssues.length === 0) {
+    console.log("Nothing to do.");
+    return;
+  }
+
+  // Cache backlog state IDs per team to avoid redundant API calls
+  const backlogStateByTeam = new Map<string, string>();
+
+  for (const issue of triageIssues) {
+    console.log(`\n[${new Date().toISOString()}] Processing ${issue.identifier}: ${issue.title}`);
+
+    // Get backlog state for this team (cached)
+    if (!backlogStateByTeam.has(issue.team.id)) {
+      const states = await getTeamStates(issue.team.id);
+      const backlog = states.find(
+        (s) => s.type === "backlog" || s.name.toLowerCase() === "backlog"
+      );
+      if (!backlog) {
+        console.error(`  Could not find Backlog state for team ${issue.team.name}, skipping`);
+        continue;
+      }
+      backlogStateByTeam.set(issue.team.id, backlog.id);
+    }
+
+    const backlogStateId = backlogStateByTeam.get(issue.team.id)!;
+
+    // Update issue: move to backlog, assign to me, medium priority
+    await updateIssue(issue.id, backlogStateId, user.id);
+    console.log(`  Updated: moved to Backlog, assigned to ${user.name}, priority Medium`);
+
+    // Run Claude agent to solve and PR
+    try {
+      await runClaudeAgent(issue, REPO_PATH);
+    } catch (err) {
+      console.error(`  Claude agent failed for ${issue.identifier}:`, err);
+    }
+  }
+
+  console.log(`\n[${new Date().toISOString()}] Done`);
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
