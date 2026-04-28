@@ -9,6 +9,8 @@ const DOCS_REPO_PATH = process.env.DOCS_REPO_PATH;
 const MONOREPO_PATH = process.env.MONOREPO_PATH;
 const REPO_PATH = process.env.REPO_PATH || process.cwd();
 const LOG_FILE = process.env.LOG_FILE || path.join(__dirname, "..", "linear-pr-gen.log");
+const PUSHOVER_TOKEN = process.env.PUSHOVER_TOKEN;
+const PUSHOVER_USER = process.env.PUSHOVER_USER;
 
 if (!LINEAR_API_KEY) {
   writeLog("ERROR", "LINEAR_API_KEY environment variable is required");
@@ -162,6 +164,19 @@ async function updateIssue(
   `, { id: issueId, stateId: backlogStateId, assigneeId: userId });
 }
 
+async function sendPushover(title: string, message: string): Promise<void> {
+  if (!PUSHOVER_TOKEN || !PUSHOVER_USER) return;
+  try {
+    await fetch("https://api.pushover.net/1/messages.json", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: PUSHOVER_TOKEN, user: PUSHOVER_USER, title, message }),
+    });
+  } catch (err) {
+    logError(`Pushover notification failed: ${err}`);
+  }
+}
+
 function buildRepoPaths(): { label: string; path: string }[] {
   const repos: { label: string; path: string }[] = [];
   if (DOCS_REPO_PATH) repos.push({ label: "docs", path: DOCS_REPO_PATH });
@@ -269,41 +284,36 @@ async function main() {
     return;
   }
 
-  const backlogStateByTeam = new Map<string, string>();
-  const issuesToProcess: LinearIssue[] = [];
+  // Process only the first triage issue per run to avoid long-running overlaps
+  const issue = triageIssues[0];
+  log(`Processing ${issue.identifier}: ${issue.title} (${triageIssues.length - 1} remaining)`);
 
-  // Move all triage issues to backlog first to prevent duplicate processing
-  // if a subsequent cron run starts before agents finish
-  for (const issue of triageIssues) {
-    log(`Processing ${issue.identifier}: ${issue.title}`);
-
-    if (!backlogStateByTeam.has(issue.team.id)) {
-      const states = await getTeamStates(issue.team.id);
-      const backlog = states.find(
-        (s) => s.type === "backlog" || s.name.toLowerCase() === "backlog"
-      );
-      if (!backlog) {
-        logError(`Could not find Backlog state for team ${issue.team.name}, skipping`);
-        continue;
-      }
-      backlogStateByTeam.set(issue.team.id, backlog.id);
-    }
-
-    const backlogStateId = backlogStateByTeam.get(issue.team.id)!;
-    await updateIssue(issue.id, backlogStateId, user.id);
-    log(`  Updated: moved to Backlog, assigned to ${user.email}, priority Medium`);
-    issuesToProcess.push(issue);
+  const states = await getTeamStates(issue.team.id);
+  const backlog = states.find(
+    (s) => s.type === "backlog" || s.name.toLowerCase() === "backlog"
+  );
+  if (!backlog) {
+    logError(`Could not find Backlog state for team ${issue.team.name}, skipping`);
+    return;
   }
 
-  for (const issue of issuesToProcess) {
-    try {
-      await runClaudeAgent(issue, repoPaths);
-    } catch (err) {
-      logError(`Claude agent failed for ${issue.identifier}: ${err}`);
-    }
-  }
+  await updateIssue(issue.id, backlog.id, user.id);
+  log(`  Updated: moved to Backlog, assigned to ${user.email}, priority Medium`);
 
-  log(`Done`);
+  try {
+    await runClaudeAgent(issue, repoPaths);
+    log(`Done`);
+    await sendPushover(
+      `PR ready: ${issue.identifier}`,
+      `${issue.title}\n${issue.url}`
+    );
+  } catch (err) {
+    logError(`Claude agent failed for ${issue.identifier}: ${err}`);
+    await sendPushover(
+      `PR failed: ${issue.identifier}`,
+      `${issue.title} — agent exited with error. Check logs.`
+    );
+  }
 }
 
 main().catch((err) => {
