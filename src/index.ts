@@ -30,6 +30,15 @@ function logError(message: string) {
   writeLog("ERROR", message);
 }
 
+interface LinearComment {
+  id: string;
+  body: string;
+  createdAt: string;
+  user: {
+    name: string;
+  };
+}
+
 interface LinearIssue {
   id: string;
   identifier: string;
@@ -43,6 +52,9 @@ interface LinearIssue {
   state: {
     id: string;
     name: string;
+  };
+  comments: {
+    nodes: LinearComment[];
   };
 }
 
@@ -109,6 +121,16 @@ async function getTriageIssues(userId: string): Promise<LinearIssue[]> {
           state {
             id
             name
+          }
+          comments(orderBy: { field: createdAt, direction: Ascending }) {
+            nodes {
+              id
+              body
+              createdAt
+              user {
+                name
+              }
+            }
           }
         }
       }
@@ -177,6 +199,49 @@ async function sendPushover(title: string, message: string): Promise<void> {
   }
 }
 
+interface ExistingPR {
+  repoLabel: string;
+  repoPath: string;
+  url: string;
+  number: number;
+  title: string;
+  headRefName: string;
+}
+
+async function findExistingPRs(
+  issueIdentifier: string,
+  repoPaths: { label: string; path: string }[]
+): Promise<ExistingPR[]> {
+  const results: ExistingPR[] = [];
+  for (const repo of repoPaths) {
+    try {
+      const output = await new Promise<string>((resolve, reject) => {
+        const child = spawn(
+          "gh",
+          ["pr", "list", "--search", issueIdentifier, "--state", "open", "--json", "url,number,title,headRefName"],
+          { cwd: repo.path, env: { ...process.env } }
+        );
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
+        child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+        child.on("close", (code) => {
+          if (code === 0) resolve(stdout);
+          else reject(new Error(stderr));
+        });
+        child.on("error", reject);
+      });
+      const prs = JSON.parse(output || "[]") as { url: string; number: number; title: string; headRefName: string }[];
+      for (const pr of prs) {
+        results.push({ repoLabel: repo.label, repoPath: repo.path, ...pr });
+      }
+    } catch (err) {
+      log(`Could not search PRs in ${repo.label}: ${err}`);
+    }
+  }
+  return results;
+}
+
 function buildRepoPaths(): { label: string; path: string }[] {
   const repos: { label: string; path: string }[] = [];
   if (DOCS_REPO_PATH) repos.push({ label: "docs", path: DOCS_REPO_PATH });
@@ -185,7 +250,11 @@ function buildRepoPaths(): { label: string; path: string }[] {
   return repos;
 }
 
-function runClaudeAgent(issue: LinearIssue, repoPaths: { label: string; path: string }[]): Promise<void> {
+function runClaudeAgent(
+  issue: LinearIssue,
+  repoPaths: { label: string; path: string }[],
+  existingPRs: ExistingPR[]
+): Promise<void> {
   const repoSection =
     repoPaths.length === 1
       ? `**Repo path:** ${repoPaths[0].path}`
@@ -198,6 +267,41 @@ function runClaudeAgent(issue: LinearIssue, repoPaths: { label: string; path: st
       ? `Work in the repo at ${repoPaths[0].path}.`
       : `You have access to multiple repos listed above. Read the issue and choose the most appropriate repo (or repos) to make changes in. Implement all changes needed across whichever repos are relevant.`;
 
+  const commentsSection =
+    issue.comments.nodes.length > 0
+      ? `\n## Comments\n\n${issue.comments.nodes
+          .map(
+            (c) =>
+              `**${c.user.name}** (${new Date(c.createdAt).toLocaleString()}):\n${c.body}`
+          )
+          .join("\n\n")}`
+      : "";
+
+  const existingPRSection =
+    existingPRs.length > 0
+      ? `\n## Existing Pull Request(s)\n\n${existingPRs
+          .map(
+            (pr) =>
+              `- [${pr.repoLabel}] **${pr.title}** — ${pr.url}\n  Branch: \`${pr.headRefName}\` in \`${pr.repoPath}\``
+          )
+          .join("\n")}\n`
+      : "";
+
+  const branchInstruction =
+    existingPRs.length > 0
+      ? existingPRs
+          .map(
+            (pr) =>
+              `For repo [${pr.repoLabel}], check out the existing branch \`${pr.headRefName}\` in \`${pr.repoPath}\` and update it.`
+          )
+          .join(" ")
+      : `Create a new git branch named \`${issue.identifier.toLowerCase()}-${issue.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40)}\` in the repo(s) you are changing.`;
+
+  const prInstruction =
+    existingPRs.length > 0
+      ? `Push the updated branch(es) and update the existing PR(s) listed above (use \`gh pr edit\` if needed). Each PR body must include:\n   - A summary of the changes made\n   - A **Test Plan** section with a markdown checklist of concrete steps a reviewer can follow to verify the changes work correctly\n   - A link to the Linear issue: ${issue.url}`
+      : `Push the branch and create a GitHub PR using \`gh pr create\` for each repo you changed. Each PR body must include:\n   - A summary of the changes made\n   - A **Test Plan** section with a markdown checklist of concrete steps a reviewer can follow to verify the changes work correctly (e.g. specific commands to run, UI flows to exercise, edge cases to check)\n   - A link to the Linear issue: ${issue.url}`;
+
   const prompt = `You are working on a software project. Your task is to implement the solution for a Linear issue and open a GitHub PR.
 
 ## Linear Issue
@@ -207,22 +311,19 @@ function runClaudeAgent(issue: LinearIssue, repoPaths: { label: string; path: st
 **URL:** ${issue.url}
 **Description:**
 ${issue.description || "(no description provided)"}
-
+${commentsSection}
 ## Repos
 
 ${repoSection}
-
+${existingPRSection}
 ## Instructions
 
 1. ${repoInstruction}
 2. Read the relevant codebase(s) to understand the code for this issue.
-3. Implement the solution described in the issue.
-4. Create a new git branch named \`${issue.identifier.toLowerCase()}-${issue.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40)}\` in the repo(s) you are changing.
+3. Implement the solution described in the issue. If there are comments on the issue, treat the most recent comments as the authoritative direction — they may override or refine the original description.
+4. ${branchInstruction}
 5. Commit your changes with a descriptive message referencing the issue identifier.
-6. Push the branch and create a GitHub PR using \`gh pr create\` for each repo you changed. Each PR body must include:
-   - A summary of the changes made
-   - A **Test Plan** section with a markdown checklist of concrete steps a reviewer can follow to verify the changes work correctly (e.g. specific commands to run, UI flows to exercise, edge cases to check)
-   - A link to the Linear issue: ${issue.url}
+6. ${prInstruction}
 7. Output the PR URL(s) when done.
 
 Work autonomously and make reasonable decisions. If the description is unclear, implement your best interpretation.`;
@@ -300,8 +401,13 @@ async function main() {
   await updateIssue(issue.id, backlog.id, user.id);
   log(`  Updated: moved to Backlog, assigned to ${user.email}, priority Medium`);
 
+  const existingPRs = await findExistingPRs(issue.identifier, repoPaths);
+  if (existingPRs.length > 0) {
+    log(`  Found ${existingPRs.length} existing PR(s) for ${issue.identifier}: ${existingPRs.map((p) => p.url).join(", ")}`);
+  }
+
   try {
-    await runClaudeAgent(issue, repoPaths);
+    await runClaudeAgent(issue, repoPaths, existingPRs);
     log(`Done`);
     await sendPushover(
       `PR ready: ${issue.identifier}`,
