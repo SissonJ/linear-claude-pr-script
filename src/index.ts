@@ -272,7 +272,7 @@ function runClaudeAgent(
       ? `\n## Comments\n\n${issue.comments.nodes
           .map(
             (c) =>
-              `**${c.user.name}** (${new Date(c.createdAt).toLocaleString()}):\n${c.body}`
+              `**${c.user?.name ?? "Unknown"}** (${new Date(c.createdAt).toLocaleString()}):\n${c.body}`
           )
           .join("\n\n")}`
       : "";
