@@ -87,7 +87,26 @@ claude
 
 Follow the login prompts. After authenticating, the CLI stores credentials locally and subsequent runs (including cron) will use them automatically alongside `ANTHROPIC_API_KEY`.
 
-### 6. Repo paths
+### 6. Pushover notifications (optional)
+
+The tool can send a push notification to your phone when a PR is opened or when an agent fails. It uses [Pushover](https://pushover.net) — a $5 one-time purchase per platform (iOS/Android).
+
+1. Create an account at [pushover.net](https://pushover.net) and note your **User Key** from the dashboard
+2. Register a new application at [pushover.net/apps/build](https://pushover.net/apps/build) and copy the **API Token**
+3. Set both in `.env`:
+
+```
+PUSHOVER_TOKEN=your_app_api_token
+PUSHOVER_USER=your_user_key
+```
+
+If either variable is missing, notifications are silently skipped — no errors or crashes.
+
+**What you'll receive:**
+- Success: `PR ready: ENG-42` → issue title + PR URL
+- Failure: `PR failed: ENG-42` → prompt to check the log file
+
+### 7. Repo paths
 
 Set `DOCS_REPO_PATH` and/or `MONOREPO_PATH` to the absolute paths of your local git repos:
 
@@ -160,6 +179,70 @@ Tips for cron:
 
 ---
 
+## Running under a dedicated `claude-agent` user (Linux)
+
+For server deployments it's safer to run the script as a dedicated unprivileged user rather than as root. This section walks through the setup assuming the project and repos live under `/root/`.
+
+### 1. Create the user
+
+```bash
+useradd -m claude-agent
+```
+
+### 2. Grant read/execute access to the project and repo directories
+
+The new user needs to traverse directories owned by root:
+
+```bash
+chmod o+rx /root /root/linear-claude-pr-script
+chmod o+rx /root/your-repo
+chmod o+rx /root/your-docs-repo/
+```
+
+Repeat for every repo directory listed in `MONOREPO_PATH`, `DOCS_REPO_PATH`, etc.
+
+### 3. Grant write access to directories the agent modifies
+
+Claude creates branches, writes files, and appends to the log, so it needs write permission on every directory it touches:
+
+```bash
+chmod o+w /root/linear-claude-pr-script/linear-pr-gen.log
+chmod o+w /root/your-repo
+chmod o+w /root/your-docs-repo/
+```
+
+### 4. Test the run
+
+Verify the user can execute the script before wiring up cron:
+
+```bash
+sudo -u claude-agent bash -c 'cd /root/linear-claude-pr-script && /usr/local/bin/node dist/index.js >> /tmp/cron-stderr.log 2>&1'
+```
+
+Check `/tmp/cron-stderr.log` for startup errors and `linear-pr-gen.log` for agent output.
+
+### 5. Set up the cron job
+
+Edit the `claude-agent` user's crontab:
+
+```bash
+crontab -u claude-agent -e
+```
+
+Example entry — run every hour:
+
+```cron
+0 * * * * cd /root/linear-claude-pr-script && /usr/local/bin/node dist/index.js >> /tmp/cron-stderr.log 2>&1
+```
+
+Make sure `/tmp/cron-stderr.log` is writable by the user, or redirect to a path the user owns:
+
+```bash
+chmod o+w /tmp/cron-stderr.log
+```
+
+---
+
 ## Environment variable reference
 
 | Variable | Required | Default | Description |
@@ -172,6 +255,8 @@ Tips for cron:
 | `ANTHROPIC_API_KEY` | Yes | — | Anthropic/Claude API key (`sk-ant-...`) |
 | `ANTHROPIC_BASE_URL` | No | `https://api.anthropic.com` | Override for enterprise API endpoints |
 | `LOG_FILE` | No | `./linear-pr-gen.log` | Path to the append-only log file |
+| `PUSHOVER_TOKEN` | No | — | Pushover app API token — enables push notifications |
+| `PUSHOVER_USER` | No | — | Pushover user key — required alongside `PUSHOVER_TOKEN` |
 
 ---
 
