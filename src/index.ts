@@ -11,6 +11,8 @@ const REPO_PATH = process.env.REPO_PATH || process.cwd();
 const LOG_FILE = process.env.LOG_FILE || path.join(__dirname, "..", "linear-pr-gen.log");
 const PUSHOVER_TOKEN = process.env.PUSHOVER_TOKEN;
 const PUSHOVER_USER = process.env.PUSHOVER_USER;
+const GIT_USER_NAME = process.env.GIT_USER_NAME;
+const GIT_USER_EMAIL = process.env.GIT_USER_EMAIL;
 
 if (!LINEAR_API_KEY) {
   writeLog("ERROR", "LINEAR_API_KEY environment variable is required");
@@ -303,7 +305,6 @@ function runClaudeAgent(
       : `Push the branch and create a GitHub PR using \`gh pr create\` for each repo you changed. Each PR body must include:\n   - A summary of the changes made\n   - A **Test Plan** section with a markdown checklist of concrete steps a reviewer can follow to verify the changes work correctly (e.g. specific commands to run, UI flows to exercise, edge cases to check)\n   - A link to the Linear issue: ${issue.url}`;
 
   const prompt = `You are working on a software project. Your task is to implement the solution for a Linear issue and open a GitHub PR.
-      Do not include a Co-authored-by: trailer, and do not attribute the commit to yourself or me. Provide only the standard commit message subject and body.
 
 ## Linear Issue
 
@@ -377,6 +378,14 @@ async function main() {
 
   const user = await getCurrentUser();
   log(`Authenticated as: ${user.name} (${user.email})`);
+
+  const gitAuthorName = GIT_USER_NAME || user.name;
+  const gitAuthorEmail = GIT_USER_EMAIL || user.email;
+  process.env.GIT_AUTHOR_NAME = gitAuthorName;
+  process.env.GIT_AUTHOR_EMAIL = gitAuthorEmail;
+  process.env.GIT_COMMITTER_NAME = gitAuthorName;
+  process.env.GIT_COMMITTER_EMAIL = gitAuthorEmail;
+  log(`Git author: ${gitAuthorName} <${gitAuthorEmail}>`);
 
   const triageIssues = await getTriageIssues(user.id);
   log(`Found ${triageIssues.length} triage issue(s) created by you`);

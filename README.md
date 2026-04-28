@@ -243,6 +243,43 @@ chmod o+w /tmp/cron-stderr.log
 
 ---
 
+## Git attribution
+
+Automated commits made by the Claude agent are attributed using the standard Git environment variables `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL`. The script sets all four at startup so every commit the agent makes carries your identity.
+
+### Setting your identity
+
+Add these two variables to your `.env` file:
+
+```
+GIT_USER_NAME=Your Name
+GIT_USER_EMAIL=you@example.com
+```
+
+If either is unset, the script falls back to the name and email on your Linear account (resolved via the API at startup).
+
+### Preventing Claude Code CLI from overriding the author
+
+By default the Claude Code CLI appends a `Co-Authored-By: Claude` trailer to every commit message and may override the git author. To disable this, edit your global Claude Code settings file:
+
+- **macOS / Linux:** `~/.claude/settings.json`
+- **Windows:** `%APPDATA%\claude-code\settings.json`
+
+Add (or merge) the following block:
+
+```json
+{
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  }
+}
+```
+
+Setting both values to empty strings tells the CLI to omit the `Co-Authored-By` trailer entirely and leave the git author/committer identity untouched, so your commits show your name rather than the agent's.
+
+---
+
 ## Environment variable reference
 
 | Variable | Required | Default | Description |
