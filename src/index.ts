@@ -122,7 +122,7 @@ async function getTriageIssues(userId: string): Promise<LinearIssue[]> {
             id
             name
           }
-          comments(orderBy: { field: createdAt, direction: Ascending }) {
+          comments(orderBy: createdAt) {
             nodes {
               id
               body
@@ -303,6 +303,7 @@ function runClaudeAgent(
       : `Push the branch and create a GitHub PR using \`gh pr create\` for each repo you changed. Each PR body must include:\n   - A summary of the changes made\n   - A **Test Plan** section with a markdown checklist of concrete steps a reviewer can follow to verify the changes work correctly (e.g. specific commands to run, UI flows to exercise, edge cases to check)\n   - A link to the Linear issue: ${issue.url}`;
 
   const prompt = `You are working on a software project. Your task is to implement the solution for a Linear issue and open a GitHub PR.
+      Do not include a Co-authored-by: trailer, and do not attribute the commit to yourself or me. Provide only the standard commit message subject and body.
 
 ## Linear Issue
 
