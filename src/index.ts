@@ -98,14 +98,29 @@ async function getCurrentUser(): Promise<{ id: string; name: string; email: stri
   return data.viewer;
 }
 
-async function getTriageIssues(userId: string): Promise<LinearIssue[]> {
+async function getUserByEmail(email: string): Promise<{ id: string; name: string; email: string } | null> {
+  const data = await linearQuery<{ users: { nodes: { id: string; name: string; email: string }[] } }>(`
+    query($email: String!) {
+      users(filter: { email: { eq: $email } }) {
+        nodes {
+          id
+          name
+          email
+        }
+      }
+    }
+  `, { email });
+  return data.users.nodes[0] ?? null;
+}
+
+async function getTriageIssues(userIds: string[]): Promise<LinearIssue[]> {
   const data = await linearQuery<{
     issues: { nodes: LinearIssue[] };
   }>(`
-    query($userId: ID!) {
+    query($userIds: [ID!]!) {
       issues(
         filter: {
-          creator: { id: { eq: $userId } }
+          creator: { id: { in: $userIds } }
           state: { type: { eq: "triage" } }
         }
         first: 50
@@ -137,7 +152,7 @@ async function getTriageIssues(userId: string): Promise<LinearIssue[]> {
         }
       }
     }
-  `, { userId });
+  `, { userIds });
   return data.issues.nodes;
 }
 
@@ -162,7 +177,7 @@ async function getTeamStates(teamId: string): Promise<LinearState[]> {
 
 async function updateIssue(
   issueId: string,
-  backlogStateId: string,
+  inProgressStateId: string,
   userId: string
 ): Promise<void> {
   await linearQuery(`
@@ -185,7 +200,7 @@ async function updateIssue(
         }
       }
     }
-  `, { id: issueId, stateId: backlogStateId, assigneeId: userId });
+  `, { id: issueId, stateId: inProgressStateId, assigneeId: userId });
 }
 
 async function sendPushover(title: string, message: string): Promise<void> {
@@ -387,8 +402,16 @@ async function main() {
   process.env.GIT_COMMITTER_EMAIL = gitAuthorEmail;
   log(`Git author: ${gitAuthorName} <${gitAuthorEmail}>`);
 
-  const triageIssues = await getTriageIssues(user.id);
-  log(`Found ${triageIssues.length} triage issue(s) created by you`);
+  const simonUser = await getUserByEmail("simon@gauntlet.xyz");
+  const creatorIds = [user.id, ...(simonUser ? [simonUser.id] : [])];
+  if (simonUser) {
+    log(`Also picking up triage issues created by ${simonUser.name} (${simonUser.email})`);
+  } else {
+    log(`Could not resolve simon@gauntlet.xyz — only picking up issues created by ${user.email}`);
+  }
+
+  const triageIssues = await getTriageIssues(creatorIds);
+  log(`Found ${triageIssues.length} triage issue(s)`);
 
   if (triageIssues.length === 0) {
     log("Nothing to do.");
@@ -400,16 +423,16 @@ async function main() {
   log(`Processing ${issue.identifier}: ${issue.title} (${triageIssues.length - 1} remaining)`);
 
   const states = await getTeamStates(issue.team.id);
-  const backlog = states.find(
-    (s) => s.type === "backlog" || s.name.toLowerCase() === "backlog"
+  const inProgress = states.find(
+    (s) => s.type === "started" || s.name.toLowerCase() === "in progress"
   );
-  if (!backlog) {
-    logError(`Could not find Backlog state for team ${issue.team.name}, skipping`);
+  if (!inProgress) {
+    logError(`Could not find In Progress state for team ${issue.team.name}, skipping`);
     return;
   }
 
-  await updateIssue(issue.id, backlog.id, user.id);
-  log(`  Updated: moved to Backlog, assigned to ${user.email}, priority Medium`);
+  await updateIssue(issue.id, inProgress.id, user.id);
+  log(`  Updated: moved to In Progress, assigned to ${user.email}, priority Medium`);
 
   const existingPRs = await findExistingPRs(issue.identifier, repoPaths);
   if (existingPRs.length > 0) {
