@@ -342,7 +342,7 @@ Work autonomously and make reasonable decisions. If the description is unclear, 
 
     const child = spawn(
       "claude",
-      ["--permission-mode", "bypassPermissions", "--print", prompt],
+      ["--permission-mode", "bypassPermissions", "--print", "--model", "claude-sonnet-4-6", "--max-turns", "30", prompt],
       {
         cwd: primaryRepoPath,
         stdio: ["ignore", "pipe", "pipe"],
