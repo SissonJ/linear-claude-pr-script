@@ -98,29 +98,18 @@ async function getCurrentUser(): Promise<{ id: string; name: string; email: stri
   return data.viewer;
 }
 
-async function getUserByEmail(email: string): Promise<{ id: string; name: string; email: string } | null> {
-  const data = await linearQuery<{ users: { nodes: { id: string; name: string; email: string }[] } }>(`
-    query($email: String!) {
-      users(filter: { email: { eq: $email } }) {
-        nodes {
-          id
-          name
-          email
-        }
-      }
-    }
-  `, { email });
-  return data.users.nodes[0] ?? null;
-}
 
-async function getTriageIssues(userIds: string[]): Promise<LinearIssue[]> {
+async function getTriageIssues(userId: string): Promise<LinearIssue[]> {
   const data = await linearQuery<{
     issues: { nodes: LinearIssue[] };
   }>(`
-    query($userIds: [ID!]!) {
+    query($userId: ID!) {
       issues(
         filter: {
-          creator: { id: { in: $userIds } }
+          or: [
+            { creator: { id: { eq: $userId } } }
+            { assignee: { id: { eq: $userId } } }
+          ]
           state: { type: { eq: "triage" } }
         }
         first: 50
@@ -152,7 +141,7 @@ async function getTriageIssues(userIds: string[]): Promise<LinearIssue[]> {
         }
       }
     }
-  `, { userIds });
+  `, { userId });
   return data.issues.nodes;
 }
 
@@ -402,15 +391,8 @@ async function main() {
   process.env.GIT_COMMITTER_EMAIL = gitAuthorEmail;
   log(`Git author: ${gitAuthorName} <${gitAuthorEmail}>`);
 
-  const simonUser = await getUserByEmail("simon@gauntlet.xyz");
-  const creatorIds = [user.id, ...(simonUser ? [simonUser.id] : [])];
-  if (simonUser) {
-    log(`Also picking up triage issues created by ${simonUser.name} (${simonUser.email})`);
-  } else {
-    log(`Could not resolve simon@gauntlet.xyz — only picking up issues created by ${user.email}`);
-  }
-
-  const triageIssues = await getTriageIssues(creatorIds);
+  log(`Fetching triage issues created by or assigned to ${user.email}`);
+  const triageIssues = await getTriageIssues(user.id);
   log(`Found ${triageIssues.length} triage issue(s)`);
 
   if (triageIssues.length === 0) {
